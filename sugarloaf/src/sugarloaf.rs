@@ -529,13 +529,44 @@ impl Sugarloaf<'_> {
         self.state.content.get_transient_text_mut(index)
     }
 
-    /// Set font size for transient text
+    /// Set font size for transient text.
+    ///
+    /// Mirrors `set_text_font_size` for cached text: updates the layout
+    /// font_size, recomputes character cell `dimensions` for the new
+    /// size, and marks the shape cache stale so glyphs are re-shaped
+    /// on the next render. Without the dimension recompute,
+    /// `add_transient_text` would leave cell width/height frozen at
+    /// the default root layout size while shaping ran at the new size,
+    /// breaking proportional layout. Without the shape cache flag,
+    /// glyphs would continue to be shaped at the previous font size
+    /// despite the new `layout.font_size` value.
     #[inline]
     pub fn set_transient_text_font_size(&mut self, index: usize, font_size: f32) {
+        // Compute dimensions outside the borrow of `transient_state` so we
+        // can call `calculate_character_cell_dimensions` (also on `content`).
+        let new_dims = {
+            let layout_opt = self
+                .state
+                .content
+                .get_transient_state_mut(index)
+                .and_then(|cs| cs.as_text_mut())
+                .map(|s| {
+                    let mut l = s.layout;
+                    l.font_size = font_size;
+                    l
+                });
+            layout_opt.map(|l| self.state.content.calculate_character_cell_dimensions(&l))
+        };
         if let Some(content_state) = self.state.content.get_transient_state_mut(index) {
             if let Some(text_state) = content_state.as_text_mut() {
                 text_state.layout.font_size = font_size;
+                if let Some(dims) = new_dims {
+                    text_state.layout.dimensions = dims;
+                }
                 text_state.scaled_font_size = font_size * self.state.style.scale_factor;
+                // Force re-shape on next render (otherwise glyphs stay at
+                // the previous size).
+                text_state.last_update = crate::layout::content::BuilderStateUpdate::Full;
             }
             content_state.render_data.needs_repaint = true;
         }
