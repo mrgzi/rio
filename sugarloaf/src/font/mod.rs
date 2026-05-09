@@ -74,11 +74,86 @@ pub fn clear_font_data_cache() {
     }
 }
 
+/// UTR #51 grapheme presentation: combines the explicit VS-15 (text)
+/// and VS-16 (emoji) variation selectors with the default
+/// `Emoji_Presentation` property (default-emoji codepoints). Mirrors
+/// the semantics of WezTerm's `Presentation::for_grapheme`, written
+/// against the `unicode-properties` crate.
+///
+/// `Some(true)`  → emoji glyph should be preferred (e.g. `⚠️`, `✅`, `🌀`).
+/// `Some(false)` → text glyph should be preferred (e.g. `⚠︎` with VS-15).
+/// `None`        → no preference; the cascade behaves as it did before
+///                 (e.g. `A`, `✓`, `─`).
+pub fn presentation_prefer_emoji(grapheme: &str) -> Option<bool> {
+    use unicode_properties::{EmojiStatus, UnicodeEmoji};
+    // The trailing variation selector wins when both are present.
+    for ch in grapheme.chars().rev() {
+        if ch == '\u{FE0F}' {
+            return Some(true);
+        }
+        if ch == '\u{FE0E}' {
+            return Some(false);
+        }
+    }
+    // No selector → consult the default presentation: the four
+    // `EmojiStatus` variants below cover `Emoji_Presentation=YES`
+    // (the U+1F300+ block, U+26A1 ⚡, etc). Default-Text emoji like
+    // U+26A0 ⚠ are not in this set and fall through to `None`,
+    // letting the cascade resolve them with no preference.
+    for ch in grapheme.chars() {
+        let status = ch.emoji_status();
+        if matches!(
+            status,
+            EmojiStatus::EmojiPresentation
+                | EmojiStatus::EmojiPresentationAndModifierBase
+                | EmojiStatus::EmojiPresentationAndEmojiComponent
+                | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent,
+        ) {
+            return Some(true);
+        }
+    }
+    None
+}
+
 pub fn lookup_for_font_match(
     cluster: &mut CharCluster,
     synth: &mut Synthesis,
     library: &FontLibraryData,
     spec_font_attr_opt: Option<&(crate::font_introspector::Style, bool)>,
+    prefer_emoji: Option<bool>,
+) -> Option<(usize, bool)> {
+    // Two-pass search: the first pass only considers fonts whose
+    // `is_emoji` matches `prefer_emoji`, the second pass takes the
+    // remaining fonts. This is what lets `⚠️` (with VS-16) land on
+    // a color-emoji family while `⚠︎` (with VS-15) lands on a text
+    // family. With no preference (`None`) we do a single ordered
+    // sweep, preserving the original behaviour.
+    let passes: &[Option<bool>] = match prefer_emoji {
+        Some(want) => &[Some(want), Some(!want)],
+        None => &[None],
+    };
+    for &pass_filter in passes {
+        if let Some(result) =
+            lookup_pass(cluster, synth, library, spec_font_attr_opt, pass_filter)
+        {
+            return Some(result);
+        }
+    }
+
+    // Spec-drop fallback (original behaviour): if nothing matched and
+    // we had a style requirement, drop it and retry.
+    if spec_font_attr_opt.is_some() {
+        return lookup_for_font_match(cluster, synth, library, None, prefer_emoji);
+    }
+    None
+}
+
+fn lookup_pass(
+    cluster: &mut CharCluster,
+    synth: &mut Synthesis,
+    library: &FontLibraryData,
+    spec_font_attr_opt: Option<&(crate::font_introspector::Style, bool)>,
+    require_emoji: Option<bool>,
 ) -> Option<(usize, bool)> {
     let mut search_result = None;
     let mut font_synth = Synthesis::default();
@@ -90,6 +165,12 @@ pub fn lookup_for_font_match(
         if let Some(font) = library.inner.get(&font_id) {
             is_emoji = font.is_emoji;
             font_synth = font.synth;
+
+            if let Some(want) = require_emoji {
+                if is_emoji != want {
+                    continue;
+                }
+            }
 
             // In this case, the font does match however
             // we need to check if is indeed a match
@@ -162,12 +243,6 @@ pub fn lookup_for_font_match(
             search_result = Some((font_id, is_emoji));
             break;
         }
-    }
-
-    // In case no font_id is found and exists a font spec requirement
-    // then drop requirement and try to find something that can match.
-    if search_result.is_none() && spec_font_attr_opt.is_some() {
-        return lookup_for_font_match(cluster, synth, library, None);
     }
 
     search_result
@@ -292,6 +367,7 @@ impl FontLibraryData {
         &self,
         ch: char,
         fragment_style: &SpanStyle,
+        prefer_emoji: Option<bool>,
     ) -> Option<(usize, bool)> {
         let mut synth = Synthesis::default();
         let mut char_cluster = CharCluster::new();
@@ -336,6 +412,7 @@ impl FontLibraryData {
             &mut synth,
             self,
             spec_font_attr.as_ref(),
+            prefer_emoji,
         ) {
             return Some(result);
         }
@@ -1356,4 +1433,43 @@ fn load_from_font_source(path: &PathBuf) -> Option<SharedData> {
         .entry(path.clone())
         .or_insert_with(|| shared_data.clone());
     Some(entry.clone())
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::presentation_prefer_emoji;
+
+    #[test]
+    fn vs16_forces_emoji() {
+        // U+26A0 (⚠) default Text + VS-16 → emoji.
+        assert_eq!(presentation_prefer_emoji("\u{26A0}\u{FE0F}"), Some(true));
+        assert_eq!(presentation_prefer_emoji("\u{2705}\u{FE0F}"), Some(true));
+    }
+
+    #[test]
+    fn vs15_forces_text() {
+        // U+26A0 + VS-15 → text glyph.
+        assert_eq!(presentation_prefer_emoji("\u{26A0}\u{FE0E}"), Some(false));
+    }
+
+    #[test]
+    fn default_emoji_presentation_prefers_emoji() {
+        // U+26A1 ⚡ default Emoji presentation; no VS gerekmez.
+        assert_eq!(presentation_prefer_emoji("\u{26A1}"), Some(true));
+        // U+1F300 🌀 default Emoji.
+        assert_eq!(presentation_prefer_emoji("\u{1F300}"), Some(true));
+        // U+2705 ✅ default Emoji.
+        assert_eq!(presentation_prefer_emoji("\u{2705}"), Some(true));
+    }
+
+    #[test]
+    fn default_text_codepoints_no_preference() {
+        // U+26A0 ⚠ default Text — VS yok, tercih yok (cascade default).
+        assert_eq!(presentation_prefer_emoji("\u{26A0}"), None);
+        // U+2713 ✓ check mark — text-default tik.
+        assert_eq!(presentation_prefer_emoji("\u{2713}"), None);
+        // ASCII / Latin metin için tercih yok.
+        assert_eq!(presentation_prefer_emoji("A"), None);
+        assert_eq!(presentation_prefer_emoji("─"), None);
+    }
 }

@@ -42,6 +42,12 @@ fn is_private_use(ch: char) -> bool {
 struct FontFallbackKey {
     codepoint: u32,
     style: u8,
+    /// UTR #51 presentation preference — `None` (cascade default),
+    /// `Some(true)` (emoji glyph), `Some(false)` (text glyph). The
+    /// same codepoint can land on different `font_id`s under different
+    /// preferences, so the preference is part of the cache key to
+    /// keep the cache invariant intact.
+    prefer_emoji: Option<bool>,
 }
 
 fn font_fallback_style_key(style: &SpanStyle) -> u8 {
@@ -1149,6 +1155,13 @@ impl Content {
             style.width = width as f32;
         }
 
+        // UTR #51 grapheme presentation: VS-15 / VS-16 selectors and
+        // the default Emoji_Presentation property steer the cascade
+        // toward the correct family. The cache key has to include the
+        // preference because the same codepoint can resolve to a
+        // different `font_id` under different presentations.
+        let prefer_emoji = crate::font::presentation_prefer_emoji(grapheme);
+
         let mut selected_font = None;
         for ch in grapheme.chars() {
             if is_variation_or_joiner(ch) {
@@ -1157,13 +1170,14 @@ impl Content {
             let key = FontFallbackKey {
                 codepoint: ch as u32,
                 style: font_fallback_style_key(&style),
+                prefer_emoji,
             };
             let candidate = if let Some(cached) = font_fallback_cache.get(&key) {
                 *cached
             } else {
                 let library = fonts.inner.read();
                 let resolved = library
-                    .find_best_font_match(ch, &style)
+                    .find_best_font_match(ch, &style, prefer_emoji)
                     .map(|(font_id, _)| font_id);
                 font_fallback_cache.insert(key, resolved);
                 resolved
