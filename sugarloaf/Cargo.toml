@@ -36,6 +36,7 @@ tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 image_rs = { workspace = true }
 unicode-width = { workspace = true }
+unicode-segmentation = "1"
 guillotiere = "0.6.2"
 rustc-hash = { workspace = true }
 raw-window-handle = { workspace = true }

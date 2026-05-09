@@ -20,10 +20,40 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use tracing::debug;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
-use crate::font_introspector::Attributes;
+use crate::font_introspector::{Attributes, Style, Weight};
 use crate::font_introspector::Setting;
 use crate::{sugarloaf::primitives::SugarCursor, DrawableChar, Graphic};
+
+fn is_variation_or_joiner(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x200D | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF
+    )
+}
+
+fn is_private_use(ch: char) -> bool {
+    matches!(ch as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
+}
+
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+struct FontFallbackKey {
+    codepoint: u32,
+    style: u8,
+}
+
+fn font_fallback_style_key(style: &SpanStyle) -> u8 {
+    let mut key = 0;
+    if style.font_attrs.weight() == Weight::BOLD {
+        key |= 1;
+    }
+    if style.font_attrs.style() == Style::Italic {
+        key |= 2;
+    }
+    key
+}
 
 /// Pre-packed shaping result ready to push directly as a RunData.
 /// Avoids re-packing OwnedGlyphClusters on every cache hit.
@@ -427,6 +457,7 @@ pub struct Content {
     /// Transient text content that gets cleared after each render
     pub transient_texts: Vec<ContentState>,
     shaping_cache: ShapingCache,
+    font_fallback_cache: FxHashMap<FontFallbackKey, Option<usize>>,
     selector: Option<usize>,
 }
 
@@ -439,6 +470,7 @@ impl Content {
             states: FxHashMap::default(),
             transient_texts: Vec::new(),
             shaping_cache: ShapingCache::new(),
+            font_fallback_cache: FxHashMap::default(),
             font_features: vec![],
             selector: None,
         }
@@ -742,6 +774,7 @@ impl Content {
                     &self.fonts,
                     &mut self.scx,
                     &mut self.shaping_cache,
+                    &mut self.font_fallback_cache,
                 );
             }
         }
@@ -989,6 +1022,7 @@ impl Content {
             &self.fonts,
             &mut self.scx,
             &mut self.shaping_cache,
+            &mut self.font_fallback_cache,
         );
     }
 
@@ -1003,51 +1037,26 @@ impl Content {
         fonts: &FontLibrary,
         scx: &mut ShapeContext,
         shaping_cache: &mut ShapingCache,
+        font_fallback_cache: &mut FxHashMap<FontFallbackKey, Option<usize>>,
     ) {
         // Cache primary font metrics at line level to avoid repeated lock acquisition
         let metrics_result = fonts.inner.write().get_font_metrics(&0, scaled_font_size);
 
-        let line = &mut text_state.lines[line_number];
-
-        for fragment_idx in 0..line.fragments.len() {
-            let font_id = line.fragments[fragment_idx].style.font_id;
-            let font_vars = line.fragments[fragment_idx].style.font_vars;
-            let style = line.fragments[fragment_idx].style;
-
-            // Resolve text range to &str from the shared buffer.
-            let content_range = line.fragments[fragment_idx].content;
-
-            // None content = advance-only fragment (no shaping)
-            let content = match content_range {
-                Some((start, end)) => &line.text_buffer[start as usize..end as usize],
-                None => {
-                    if let Some((ascent, descent, leading)) = if font_id == 0 {
-                        metrics_result
-                    } else {
-                        fonts
-                            .inner
-                            .write()
-                            .get_font_metrics(&font_id, scaled_font_size)
-                    } {
-                        let metrics = crate::font_introspector::Metrics {
-                            ascent,
-                            descent,
-                            leading,
-                            ..Default::default()
-                        };
-                        line.render_data.push_empty_run(
-                            style,
-                            scaled_font_size,
-                            line_number as u32,
-                            &metrics,
-                        );
-                    }
-                    continue;
-                }
+        let fragment_count = text_state.lines[line_number].fragments.len();
+        for fragment_idx in 0..fragment_count {
+            let (style, content) = {
+                let line = &text_state.lines[line_number];
+                let fragment = &line.fragments[fragment_idx];
+                let content = fragment
+                    .content
+                    .and_then(|(start, end)| line.text_buffer.get(start as usize..end as usize))
+                    .map(str::to_owned);
+                (fragment.style, content)
             };
 
-            // Check run cache — pre-packed so no re-packing needed
-            if let Some(cached_run) = shaping_cache.get(&font_id, content) {
+            // None content = advance-only fragment (no shaping)
+            let Some(content) = content else {
+                let font_id = style.font_id;
                 if let Some((ascent, descent, leading)) = if font_id == 0 {
                     metrics_result
                 } else {
@@ -1056,76 +1065,219 @@ impl Content {
                         .write()
                         .get_font_metrics(&font_id, scaled_font_size)
                 } {
-                    line.render_data.push_cached_run(
-                        style,
-                        scaled_font_size,
-                        line_number as u32,
-                        cached_run,
+                    let metrics = crate::font_introspector::Metrics {
                         ascent,
                         descent,
                         leading,
-                    );
-                    continue;
-                } else {
-                    debug!("Font metrics not available for font_id={}", font_id);
-                }
-            }
-
-            // Cache miss: shape the full run and store result
-            shaping_cache.set_content(font_id, content);
-
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(handle) = fonts.ct_font(font_id) {
-                    let shaped = crate::font::macos::shape_text(
-                        &handle,
-                        content,
-                        scaled_font_size,
-                    );
-                    let macos_metrics =
-                        crate::font::macos::font_metrics(&handle, scaled_font_size);
-                    line.render_data.push_run_macos(
-                        style,
-                        scaled_font_size,
-                        line_number as u32,
-                        &shaped,
-                        &macos_metrics,
-                        shaping_cache,
-                    );
-                }
-            }
-
-            #[cfg(not(target_os = "macos"))]
-            {
-                // Only allocate vars on the miss path
-                let vars: Vec<_> = text_state.vars.get(font_vars).to_vec();
-
-                let font_library = &fonts.inner.read();
-                if let Some((shared_data, offset, key)) = font_library.get_data(&font_id)
-                {
-                    let font_ref = FontRef {
-                        data: shared_data.as_ref(),
-                        offset,
-                        key,
+                        ..Default::default()
                     };
-                    let mut shaper = scx
-                        .builder(font_ref)
-                        .script(script)
-                        .size(scaled_font_size)
-                        .features(features.iter().copied())
-                        .variations(vars.iter().copied())
-                        .build();
-
-                    shaper.add_str(content);
-
-                    line.render_data.push_run(
+                    text_state.lines[line_number].render_data.push_empty_run(
                         style,
                         scaled_font_size,
                         line_number as u32,
-                        shaper,
-                        shaping_cache,
+                        &metrics,
                     );
                 }
+                continue;
+            };
+
+            let shaped_segments = Self::fallback_segments_for_fragment(
+                &content,
+                style,
+                fonts,
+                font_fallback_cache,
+            );
+            for (segment_content, segment_style) in shaped_segments {
+                let vars: Vec<_> = text_state.vars.get(segment_style.font_vars).to_vec();
+                let line = &mut text_state.lines[line_number];
+                Self::shape_text_segment(
+                    line,
+                    line_number,
+                    scaled_font_size,
+                    script,
+                    features,
+                    fonts,
+                    scx,
+                    shaping_cache,
+                    &vars,
+                    &segment_content,
+                    segment_style,
+                    metrics_result,
+                );
+            }
+        }
+    }
+
+    fn fallback_segments_for_fragment(
+        content: &str,
+        style: SpanStyle,
+        fonts: &FontLibrary,
+        font_fallback_cache: &mut FxHashMap<FontFallbackKey, Option<usize>>,
+    ) -> SmallVec<[(String, SpanStyle); 4]> {
+        let mut segments: SmallVec<[(String, SpanStyle); 4]> = SmallVec::new();
+
+        if content.is_ascii() {
+            segments.push((content.to_owned(), style));
+            return segments;
+        }
+
+        for grapheme in UnicodeSegmentation::graphemes(content, true) {
+            let grapheme_style =
+                Self::style_for_grapheme(grapheme, style, fonts, font_fallback_cache);
+
+            if let Some((text, prev_style)) = segments.last_mut() {
+                if *prev_style == grapheme_style {
+                    text.push_str(grapheme);
+                    continue;
+                }
+            }
+
+            segments.push((grapheme.to_owned(), grapheme_style));
+        }
+
+        segments
+    }
+
+    fn style_for_grapheme(
+        grapheme: &str,
+        mut style: SpanStyle,
+        fonts: &FontLibrary,
+        font_fallback_cache: &mut FxHashMap<FontFallbackKey, Option<usize>>,
+    ) -> SpanStyle {
+        let width = UnicodeWidthStr::width(grapheme);
+        if (style.width - 1.0).abs() < f32::EPSILON && width != 1 {
+            style.width = width as f32;
+        }
+
+        let mut selected_font = None;
+        for ch in grapheme.chars() {
+            if is_variation_or_joiner(ch) {
+                continue;
+            }
+            let key = FontFallbackKey {
+                codepoint: ch as u32,
+                style: font_fallback_style_key(&style),
+            };
+            let candidate = if let Some(cached) = font_fallback_cache.get(&key) {
+                *cached
+            } else {
+                let library = fonts.inner.read();
+                let resolved = library
+                    .find_best_font_match(ch, &style)
+                    .map(|(font_id, _)| font_id);
+                font_fallback_cache.insert(key, resolved);
+                resolved
+            };
+            if matches!(candidate, Some(font_id) if font_id != style.font_id) {
+                selected_font = candidate;
+                break;
+            }
+            selected_font = selected_font.or(candidate);
+        }
+
+        if let Some(font_id) = selected_font {
+            style.font_id = font_id;
+        }
+
+        style.nerd_font_constraint = grapheme
+            .chars()
+            .find_map(|ch| crate::font::nerd_font_attributes::get_constraint(ch as u32));
+
+        if style.nerd_font_constraint.is_some() || grapheme.chars().any(is_private_use) {
+            style.pua_constraint = Some(style.width.max(1.0));
+        }
+
+        style
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(target_os = "macos", allow(unused_variables))]
+    fn shape_text_segment(
+        line: &mut BuilderLine,
+        line_number: usize,
+        scaled_font_size: f32,
+        script: Script,
+        features: &[crate::font_introspector::Setting<u16>],
+        fonts: &FontLibrary,
+        scx: &mut ShapeContext,
+        shaping_cache: &mut ShapingCache,
+        vars: &[crate::font_introspector::Setting<f32>],
+        content: &str,
+        style: SpanStyle,
+        primary_metrics: Option<(f32, f32, f32)>,
+    ) {
+        let font_id = style.font_id;
+
+        // Check run cache — pre-packed so no re-packing needed
+        if let Some(cached_run) = shaping_cache.get(&font_id, content) {
+            if let Some((ascent, descent, leading)) = if font_id == 0 {
+                primary_metrics
+            } else {
+                fonts
+                    .inner
+                    .write()
+                    .get_font_metrics(&font_id, scaled_font_size)
+            } {
+                line.render_data.push_cached_run(
+                    style,
+                    scaled_font_size,
+                    line_number as u32,
+                    cached_run,
+                    ascent,
+                    descent,
+                    leading,
+                );
+                return;
+            } else {
+                debug!("Font metrics not available for font_id={}", font_id);
+            }
+        }
+
+        // Cache miss: shape the full run and store result
+        shaping_cache.set_content(font_id, content);
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(handle) = fonts.ct_font(font_id) {
+                let shaped = crate::font::macos::shape_text(&handle, content, scaled_font_size);
+                let macos_metrics = crate::font::macos::font_metrics(&handle, scaled_font_size);
+                line.render_data.push_run_macos(
+                    style,
+                    scaled_font_size,
+                    line_number as u32,
+                    &shaped,
+                    &macos_metrics,
+                    shaping_cache,
+                );
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let font_library = &fonts.inner.read();
+            if let Some((shared_data, offset, key)) = font_library.get_data(&font_id) {
+                let font_ref = FontRef {
+                    data: shared_data.as_ref(),
+                    offset,
+                    key,
+                };
+                let mut shaper = scx
+                    .builder(font_ref)
+                    .script(script)
+                    .size(scaled_font_size)
+                    .features(features.iter().copied())
+                    .variations(vars.iter().copied())
+                    .build();
+
+                shaper.add_str(content);
+
+                line.render_data.push_run(
+                    style,
+                    scaled_font_size,
+                    line_number as u32,
+                    shaper,
+                    shaping_cache,
+                );
             }
         }
     }

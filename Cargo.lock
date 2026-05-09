@@ -4071,6 +4071,7 @@ dependencies = [
  "tracing",
  "ttf-parser",
  "twox-hash",
+ "unicode-segmentation",
  "unicode-width-16",
  "walkdir",
  "wasm-bindgen",
