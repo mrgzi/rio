@@ -139,7 +139,7 @@ pub(crate) fn resolve_with(
 /// under `font_id`. Returns `None` when the font data isn't available
 /// (font id unregistered or the SFNT bytes failed to parse); the
 /// caller is responsible for picking a rendering fallback.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub(crate) fn compute_advance(
     font_ctx: &crate::font::FontLibraryData,
     font_id: usize,
@@ -158,7 +158,7 @@ pub(crate) fn compute_advance(
 /// macOS variant: derive the advance from CoreText without ever touching
 /// the font's raw bytes. Matches Ghostty's bytes-free font handling on
 /// mac.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) fn compute_advance(
     font_ctx: &crate::font::FontLibraryData,
     font_id: usize,

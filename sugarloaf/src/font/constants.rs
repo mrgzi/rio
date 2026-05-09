@@ -64,5 +64,5 @@ pub const FONT_SYMBOLS_NERD_FONT_MONO: &[u8] =
 // `fallbacks::external_fallbacks`) and doesn't need the bundled Twemoji —
 // Rio's binary drops ~600 KB by not embedding it. Kept for test builds so
 // the cross-platform COLR rasterization path stays covered.
-#[cfg(any(test, not(target_os = "macos")))]
+#[cfg(any(test, not(any(target_os = "macos", target_os = "ios"))))]
 pub const FONT_TWEMOJI_EMOJI: &[u8] = font!("./resources/Twemoji/Twemoji.Mozilla.ttf");

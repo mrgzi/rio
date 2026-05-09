@@ -8,7 +8,7 @@
 use crate::font::FontLibrary;
 use crate::font_introspector::shape::ShapeContext;
 use crate::font_introspector::text::Script;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 use crate::font_introspector::FontRef;
 use crate::layout::content_data::{ContentData, ContentState};
 use crate::layout::render_data::RenderData;
@@ -605,7 +605,7 @@ impl Content {
         // primary CTFont. This is the last byte-dependent path that
         // mattered on mac — using CTFont here means `FONT_DATA_CACHE`
         // never holds the primary font either.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         if let Some(handle) = self.fonts.ct_font(0) {
             let metrics = crate::font::macos::font_metrics(&handle, font_size);
             let char_width = crate::font::macos::advance_units_for_char(&handle, ' ')
@@ -621,7 +621,7 @@ impl Content {
             };
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         if let Some(font_library_data) = self.fonts.inner.try_read() {
             let font_id = 0; // FONT_ID_REGULAR
 
@@ -1033,7 +1033,7 @@ impl Content {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(target_os = "macos", allow(unused_variables))]
+    #[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(unused_variables))]
     fn process_text_line(
         text_state: &mut BuilderState,
         line_number: usize,
@@ -1205,7 +1205,7 @@ impl Content {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(target_os = "macos", allow(unused_variables))]
+    #[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(unused_variables))]
     fn shape_text_segment(
         line: &mut BuilderLine,
         line_number: usize,
@@ -1250,7 +1250,7 @@ impl Content {
         // Cache miss: shape the full run and store result
         shaping_cache.set_content(font_id, content);
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             if let Some(handle) = fonts.ct_font(font_id) {
                 let shaped = crate::font::macos::shape_text(&handle, content, scaled_font_size);
@@ -1266,7 +1266,7 @@ impl Content {
             }
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
             let font_library = &fonts.inner.read();
             if let Some((shared_data, offset, key)) = font_library.get_data(&font_id) {
