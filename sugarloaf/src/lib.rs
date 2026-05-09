@@ -26,7 +26,6 @@ pub use crate::sugarloaf::{
     Colorspace, Sugarloaf, SugarloafBackend, SugarloafErrors, SugarloafRenderer,
     SugarloafWindow, SugarloafWindowSize, SugarloafWithErrors,
 };
-pub use components::filters::Filter;
 pub use layout::{
     Content, RichTextConfig, SpanStyle, SpanStyleDecoration, TextDimensions,
     UnderlineInfo, UnderlineShape,

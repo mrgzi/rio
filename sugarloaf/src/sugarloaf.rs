@@ -3,7 +3,6 @@ pub mod primitives;
 pub mod state;
 
 use crate::components::core::image::Handle;
-use crate::components::filters::{Filter, FiltersBrush};
 use crate::font::{fonts::SugarloafFont, FontLibrary};
 use crate::font_cache::{compute_advance, resolve_with, FontCache, ResolvedGlyph};
 use crate::font_introspector::Attributes;
@@ -28,7 +27,6 @@ pub struct Sugarloaf<'a> {
     pub background_color: Option<wgpu::Color>,
     pub background_image: Option<ImageProperties>,
     pub graphics: Graphics,
-    filters_brush: Option<FiltersBrush>,
     /// Pixel data for standalone image textures, keyed by ImageId.
     pub image_data: rustc_hash::FxHashMap<u32, GraphicDataEntry>,
     /// Persistent state for the CPU rasterizer (glyph cache + frame hash).
@@ -175,7 +173,6 @@ impl Sugarloaf<'_> {
             background_image: None,
             renderer,
             graphics: Graphics::default(),
-            filters_brush: None,
             image_data: rustc_hash::FxHashMap::default(),
             cpu_cache: crate::renderer::cpu::CpuCache::new(),
             font_cache,
@@ -349,22 +346,6 @@ impl Sugarloaf<'_> {
             true
         } else {
             false
-        }
-    }
-
-    #[inline]
-    pub fn update_filters(&mut self, filters: &[Filter]) {
-        if filters.is_empty() {
-            self.filters_brush = None;
-        } else {
-            if self.filters_brush.is_none() {
-                self.filters_brush = Some(FiltersBrush::default());
-            }
-            if let Some(ref mut brush) = self.filters_brush {
-                if let crate::context::ContextType::Wgpu(ctx) = &self.ctx.inner {
-                    brush.update_filters(ctx, filters);
-                }
-            }
         }
     }
 
@@ -1119,14 +1100,6 @@ impl Sugarloaf<'_> {
                     self.renderer.render(ctx, &mut rpass);
                 }
 
-                if let Some(ref mut filters_brush) = self.filters_brush {
-                    filters_brush.render(
-                        ctx,
-                        &mut encoder,
-                        &frame.texture,
-                        &frame.texture,
-                    );
-                }
                 ctx.queue.submit(Some(encoder.finish()));
                 frame.present();
             }
