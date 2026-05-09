@@ -1060,55 +1060,66 @@ impl Sugarloaf<'_> {
             _ => return,
         };
 
-        match ctx.surface.get_current_texture() {
-            Ok(frame) => {
-                let mut encoder =
-                    ctx.device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: None,
-                        });
-
-                let view = frame
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
-
-                {
-                    let load = if let Some(background_color) = self.background_color {
-                        wgpu::LoadOp::Clear(background_color)
-                    } else {
-                        wgpu::LoadOp::Load
-                    };
-
-                    let mut rpass =
-                        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            label: None,
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &view,
-                                resolve_target: None,
-                                depth_slice: None,
-                                ops: wgpu::Operations {
-                                    load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: None,
-                            multiview_mask: None,
-                        });
-
-                    self.renderer.render(ctx, &mut rpass);
-                }
-
-                ctx.queue.submit(Some(encoder.finish()));
-                frame.present();
+        // wgpu 29 replaced `Result<SurfaceTexture, SurfaceError>` with
+        // the `CurrentSurfaceTexture` enum. Map states 1:1 to the old
+        // behavior: render on Success/Suboptimal, drop the frame on
+        // Outdated/Occluded/Timeout, and panic on Lost/Validation
+        // (the closest equivalent of the old `OutOfMemory` arm —
+        // unrecoverable, we don't try to rebuild the device here).
+        let frame = match ctx.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Outdated
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Timeout => {
+                self.reset();
+                return;
             }
-            Err(error) => {
-                if error == wgpu::SurfaceError::OutOfMemory {
-                    panic!("Swapchain error: {error}. Rendering cannot continue.")
-                }
+            wgpu::CurrentSurfaceTexture::Lost
+            | wgpu::CurrentSurfaceTexture::Validation => {
+                panic!("Swapchain error: surface lost or invalid. Rendering cannot continue.")
             }
+        };
+
+        let mut encoder =
+            ctx.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: None,
+                });
+
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        {
+            let load = if let Some(background_color) = self.background_color {
+                wgpu::LoadOp::Clear(background_color)
+            } else {
+                wgpu::LoadOp::Load
+            };
+
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                multiview_mask: None,
+            });
+
+            self.renderer.render(ctx, &mut rpass);
         }
+
+        ctx.queue.submit(Some(encoder.finish()));
+        frame.present();
         self.reset();
     }
 }
