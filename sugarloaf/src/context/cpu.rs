@@ -10,7 +10,7 @@
 use crate::sugarloaf::{SugarloafWindow, SugarloafWindowSize};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::num::NonZeroU32;
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct SoftbufferHandle {
     window: RawWindowHandle,
@@ -34,10 +34,22 @@ impl raw_window_handle::HasDisplayHandle for SoftbufferHandle {
     }
 }
 
+// `RawWindowHandle` / `RawDisplayHandle` are `!Send + !Sync` by default.
+// We carry them across threads only as opaque pointers handed to softbuffer;
+// the platform contract (handles outlive the surface) is upheld by the
+// caller, and softbuffer itself is the only consumer. `Arc` (below) needs
+// `T: Send + Sync` to be `Send + Sync`, so this assertion is what lets the
+// outer `Sugarloaf` stay `Send + Sync + 'static` for embedding hosts.
 unsafe impl Send for SoftbufferHandle {}
 unsafe impl Sync for SoftbufferHandle {}
 
-pub type CpuSurface = softbuffer::Surface<Rc<SoftbufferHandle>, Rc<SoftbufferHandle>>;
+// `Arc` instead of `Rc` so that `Sugarloaf` (which transitively contains
+// this surface in `ContextType::Cpu`) remains `Send + Sync + 'static` and
+// can be stored in containers like `egui_wgpu::CallbackResources`.
+// softbuffer accepts any handle wrapper that impls
+// `HasWindowHandle + HasDisplayHandle`; `Arc` qualifies and is otherwise
+// indistinguishable from `Rc` here.
+pub type CpuSurface = softbuffer::Surface<Arc<SoftbufferHandle>, Arc<SoftbufferHandle>>;
 
 pub struct CpuContext {
     pub size: SugarloafWindowSize,
@@ -46,7 +58,7 @@ pub struct CpuContext {
     pub width_px: u32,
     pub height_px: u32,
     pub surface: CpuSurface,
-    _handle: Rc<SoftbufferHandle>,
+    _handle: Arc<SoftbufferHandle>,
 }
 
 impl CpuContext {
@@ -54,7 +66,7 @@ impl CpuContext {
         let size = window.size;
         let scale = window.scale;
 
-        let handle = Rc::new(SoftbufferHandle {
+        let handle = Arc::new(SoftbufferHandle {
             window: window.handle,
             display: window.display,
         });

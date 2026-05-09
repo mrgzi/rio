@@ -3,7 +3,7 @@ pub mod cpu;
 pub mod metal;
 pub mod webgpu;
 
-use crate::sugarloaf::{SugarloafBackend, SugarloafWindow};
+use crate::sugarloaf::{Colorspace, SugarloafBackend, SugarloafWindow};
 use crate::{SugarloafRenderer, SugarloafWindowSize};
 
 pub struct Context<'a> {
@@ -37,6 +37,25 @@ impl Context<'_> {
         };
 
         Context { inner }
+    }
+
+    /// Construct a `Context` that borrows the host application's wgpu
+    /// device/queue and renders into a caller-supplied `TextureView`.
+    /// Currently only the wgpu backend is supported in external mode
+    /// (Metal embeds are not part of the egui-embed glue).
+    pub fn new_external(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        format: wgpu::TextureFormat,
+        size: SugarloafWindowSize,
+        scale: f32,
+        colorspace: Colorspace,
+    ) -> Context<'static> {
+        Context {
+            inner: ContextType::Wgpu(webgpu::WgpuContext::new_external(
+                device, queue, format, size, scale, colorspace,
+            )),
+        }
     }
 
     #[inline]

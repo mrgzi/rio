@@ -181,6 +181,53 @@ impl Sugarloaf<'_> {
         Ok(instance)
     }
 
+    /// Construct a Sugarloaf that renders into a host-owned wgpu
+    /// surface. Used by embed scenarios (e.g. egui-wgpu paint callback)
+    /// where the application already drives wgpu and just wants
+    /// Sugarloaf to draw into a `TextureView` it provides.
+    ///
+    /// `format` must match the `TextureView` format the host will pass
+    /// to [`Sugarloaf::render_wgpu_into`]. `font_features` is forwarded
+    /// to the layout state and applies to all subsequent text shaping.
+    ///
+    /// Filters and CPU/Metal backends are not supported in this mode.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_external(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        format: wgpu::TextureFormat,
+        size: SugarloafWindowSize,
+        scale: f32,
+        colorspace: Colorspace,
+        font_library: &FontLibrary,
+        layout: RootStyle,
+        font_features: Option<Vec<String>>,
+    ) -> Sugarloaf<'static> {
+        let ctx = Context::new_external(device, queue, format, size, scale, colorspace);
+        let renderer = Renderer::new(&ctx, colorspace);
+        let state = SugarState::new(layout, font_library, &font_features);
+        let font_cache = FontCache::new();
+
+        Sugarloaf {
+            state,
+            ctx,
+            // Embed mode: the clear color is applied to the OFF-SCREEN
+            // texture sugarloaf draws into, NOT to the host frame.
+            // Default to BLACK so the first frame is not undefined
+            // memory and so cells with no draw calls render as solid
+            // black. Callers that want to composite over previous
+            // contents can opt into load semantics via
+            // `set_background_color(None)`.
+            background_color: Some(wgpu::Color::BLACK),
+            background_image: None,
+            renderer,
+            graphics: Graphics::default(),
+            image_data: rustc_hash::FxHashMap::default(),
+            cpu_cache: crate::renderer::cpu::CpuCache::new(),
+            font_cache,
+        }
+    }
+
     #[inline]
     pub fn update_font(&mut self, font_library: &FontLibrary) {
         tracing::info!("requested a font change");
@@ -945,6 +992,41 @@ impl Sugarloaf<'_> {
         }
     }
 
+    /// Cell dimensions in **logical** pixels for the given font_size /
+    /// line_height. Reads metrics directly from the loaded primary font
+    /// (CTFont on macOS, swash elsewhere), so the returned `(cell_w,
+    /// cell_h)` exactly matches what the renderer will draw with — no
+    /// hardcoded multipliers from the caller.
+    #[inline]
+    pub fn logical_cell_dimensions(
+        &self,
+        font_size: f32,
+        line_height: f32,
+    ) -> Option<(f32, f32)> {
+        // Build a TextLayout that mirrors what set_transient_text_font_size
+        // would produce, then ask Content for the dimensions.
+        let scale_factor = self.state.style.scale_factor;
+        let layout = crate::layout::TextLayout {
+            font_size,
+            line_height,
+            dimensions: crate::layout::TextDimensions {
+                width: 0.0,
+                height: 0.0,
+                scale: scale_factor,
+            },
+            ..Default::default()
+        };
+        let dims = self
+            .state
+            .content
+            .calculate_character_cell_dimensions(&layout);
+        if dims.width <= 0.0 || dims.height <= 0.0 {
+            return None;
+        }
+        // Returned dims are in physical pixels; divide back to logical.
+        Some((dims.width / scale_factor, dims.height / scale_factor))
+    }
+
     #[inline]
     pub fn get_text_dimensions(&mut self, id: &usize) -> Option<TextDimensions> {
         if self.state.content.get_text_by_id(*id).is_some() {
@@ -1060,13 +1142,19 @@ impl Sugarloaf<'_> {
             _ => return,
         };
 
+        // External-surface mode: callers must drive rendering through
+        // `render_wgpu_into` instead — Sugarloaf does not own a swapchain.
+        let Some(surface) = ctx.surface.as_ref() else {
+            return;
+        };
+
         // wgpu 29 replaced `Result<SurfaceTexture, SurfaceError>` with
         // the `CurrentSurfaceTexture` enum. Map states 1:1 to the old
         // behavior: render on Success/Suboptimal, drop the frame on
         // Outdated/Occluded/Timeout, and panic on Lost/Validation
         // (the closest equivalent of the old `OutOfMemory` arm —
         // unrecoverable, we don't try to rebuild the device here).
-        let frame = match ctx.surface.get_current_texture() {
+        let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated
@@ -1121,5 +1209,108 @@ impl Sugarloaf<'_> {
         ctx.queue.submit(Some(encoder.finish()));
         frame.present();
         self.reset();
+    }
+
+    /// Render Sugarloaf's prepared frame into a host-owned
+    /// `wgpu::TextureView` using the host's command `encoder`. The
+    /// caller is responsible for acquiring the swapchain texture,
+    /// submitting the encoder, and presenting.
+    ///
+    /// Used by embed callers that own the encoder but not the render
+    /// pass (e.g. `egui_wgpu::CallbackTrait::prepare` returning a
+    /// secondary CommandBuffer). Opens a fresh render pass, loads
+    /// existing target contents (does NOT clear), and resets.
+    /// Only valid on a Sugarloaf built with [`Sugarloaf::new_external`];
+    /// no-op otherwise.
+    pub fn render_wgpu_into(
+        &mut self,
+        view: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        // The public `Sugarloaf::render` runs these in the same order;
+        // the embed path must not skip them or the renderer receives
+        // uncomputed state and produces an empty frame. These calls
+        // perform text layout, glyph atlas upload and GPU buffer
+        // writes.
+        self.state.compute_dimensions();
+        self.state.compute_updates(
+            &mut self.renderer,
+            &mut self.ctx,
+            &mut self.graphics,
+            &mut self.image_data,
+        );
+
+        let ctx = match &mut self.ctx.inner {
+            crate::context::ContextType::Wgpu(wgpu) => wgpu,
+            _ => return,
+        };
+
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sugarloaf::render_wgpu_into"),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        // Clear when a background color is set,
+                        // otherwise load — that lets a host composite
+                        // sugarloaf's output over its previous frame.
+                        // Embedding consumers (e.g. an egui Image
+                        // widget) sample this texture; `new_external`
+                        // defaults the background to BLACK so the
+                        // first frame is never undefined memory.
+                        load: match self.background_color {
+                            Some(c) => wgpu::LoadOp::Clear(c),
+                            None => wgpu::LoadOp::Load,
+                        },
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                multiview_mask: None,
+            });
+
+            self.renderer.render(ctx, &mut rpass);
+        }
+
+        self.reset();
+    }
+}
+
+// Embed-only entry point. Lives on `Sugarloaf<'static>` because the
+// callers (e.g. egui-wgpu `CallbackResources`) require the full
+// instance to be `Send + Sync + 'static`, and a non-`'static`
+// lifetime parameter on the outer `Sugarloaf<'a>` would defeat that.
+// `Sugarloaf::new_external` returns `Sugarloaf<'static>` for the
+// same reason — no surface, no borrowed window handle.
+impl Sugarloaf<'static> {
+    /// Issue Sugarloaf's draw calls into a render pass owned by the
+    /// host (typically the egui-wgpu paint callback's main pass).
+    ///
+    /// Unlike [`Sugarloaf::render_wgpu_into`], this does not open a
+    /// new render pass — it writes directly into the supplied
+    /// `render_pass`, so the host controls clear/load behavior and
+    /// composition order. This is the right entry point for
+    /// `egui_wgpu::CallbackTrait::paint`, where wgpu forbids nested
+    /// render passes.
+    ///
+    /// `'pass` is the lifetime of the host's render pass. Sugarloaf's
+    /// internal pipelines/buffers live as long as the instance
+    /// (`'static`), which is at least as long as `'pass`.
+    pub fn draw_into_pass<'pass>(
+        &'pass mut self,
+        render_pass: &mut wgpu::RenderPass<'pass>,
+    ) {
+        let ctx = match &mut self.ctx.inner {
+            crate::context::ContextType::Wgpu(wgpu) => wgpu,
+            _ => return,
+        };
+        self.renderer.render(ctx, render_pass);
+        // Reset intentionally not called here: callers may issue
+        // multiple `draw_into_pass` calls per frame (one per
+        // embedded grid widget) and reset once at end of frame.
     }
 }
