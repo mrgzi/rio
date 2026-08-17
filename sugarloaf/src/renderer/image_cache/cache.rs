@@ -284,10 +284,52 @@ impl ImageCache {
 
         // Handle mask atlas (single atlas)
         if atlas_kind == AtlasKind::Mask {
-            let atlas_data = self.mask_atlas.alloc.allocate(width, height);
+            let mut atlas_data = self.mask_atlas.alloc.allocate(width, height);
             if atlas_data.is_none() {
-                debug!("Mask atlas full for {}x{}", width, height);
-                return None;
+                // Mask atlas full — try to grow texture (Metal path),
+                // preserving existing entries. Clearing the atlas would
+                // invalidate all in-flight glyph entries for one frame,
+                // producing visible flicker. Grow doubles the texture
+                // and keeps the existing allocator state so all old
+                // entries stay valid.
+                #[cfg(target_os = "macos")]
+                if self.try_grow_texture_size(
+                    self.max_texture_size + 1,
+                    self.max_texture_size + 1,
+                ) {
+                    debug!(
+                        "Grew mask atlas to {} after fill; retrying allocate {}x{}",
+                        self.max_texture_size, width, height
+                    );
+                    atlas_data = self.mask_atlas.alloc.allocate(width, height);
+                }
+
+                // Grow failed (non-Metal or already at SIZE limit) →
+                // last resort: reset + retry. Visible artifact for one
+                // frame, but better than dropping the glyph permanently.
+                if atlas_data.is_none() {
+                    debug!(
+                        "Mask atlas full and grow failed for {}x{} — resetting",
+                        width, height
+                    );
+                    self.mask_atlas.alloc.clear();
+                    self.mask_atlas.buffer.fill(0);
+                    self.mask_atlas.dirty = true;
+                    self.mask_atlas.fresh = true;
+                    self.entries.iter_mut().for_each(|e| {
+                        if e.atlas_kind == AtlasKind::Mask {
+                            e.allocated = false;
+                        }
+                    });
+                    atlas_data = self.mask_atlas.alloc.allocate(width, height);
+                    if atlas_data.is_none() {
+                        debug!(
+                            "Mask atlas still full after reset for {}x{}",
+                            width, height
+                        );
+                        return None;
+                    }
+                }
             }
 
             let (x, y) = atlas_data?;
