@@ -113,7 +113,12 @@ pub(crate) fn resolve_with(
     };
     let mut width = ch.width().unwrap_or(1) as f32;
     let mut font_id = 0;
-    if let Some((fid, is_emoji)) = font_ctx.find_best_font_match(ch, &style) {
+    // Per-char advance lookup has no grapheme context, so we pass
+    // `None` for the presentation hint — the cascade resolves with
+    // its default ordering. Grapheme-aware selection happens in
+    // `style_for_grapheme`, which is the right layer to read VS-15 /
+    // VS-16 selectors.
+    if let Some((fid, is_emoji)) = font_ctx.find_best_font_match(ch, &style, None) {
         font_id = fid;
         if is_emoji {
             width = 2.0;

@@ -36,6 +36,15 @@ tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 image_rs = { workspace = true }
 unicode-width = { workspace = true }
+unicode-segmentation = "1"
+# UTR #51 emoji properties — used by `style_for_grapheme` font
+# selection to distinguish VS-15/VS-16 selectors and default emoji
+# presentation. Cascadia Code carries text glyphs for emoji-able
+# characters like U+26A0 (⚠) and U+2705 (✅); without a presentation
+# hint the cascade stops on the primary font and draws the text
+# glyph (on terminals this surfaces as "Ê"-like silhouettes). This
+# is the ecosystem equivalent of WezTerm's `Presentation::for_grapheme`.
+unicode-properties = { version = "0.1", default-features = false, features = ["emoji"] }
 guillotiere = "0.6.2"
 rustc-hash = { workspace = true }
 raw-window-handle = { workspace = true }
