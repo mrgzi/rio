@@ -36,8 +36,24 @@ impl<'a> WgpuContext<'a> {
         // - `webgpu`
         // - `primary`
         let backend = wgpu::Backends::from_env().unwrap_or(wgpu_backend);
+        // The Android emulator's Vulkan driver (`vulkan.ranchu.so`) has a
+        // buggy `vkSetDebugUtilsObjectNameEXT` implementation that
+        // segfaults when invoked. wgpu-hal's default `InstanceFlags`
+        // enables the `DEBUG` flag whenever `debug_assertions` is on,
+        // which in turn loads the `VK_EXT_debug_utils` extension and
+        // makes `set_object_name` calls — crashing the emulator GPU
+        // driver on every debug build. Release builds are unaffected,
+        // but development would be impossible without debug builds.
+        // Force empty instance flags on Android so debug_utils is
+        // never requested. Real Android devices typically lack Vulkan
+        // validation layers anyway, so the loss is negligible.
+        #[cfg(target_os = "android")]
+        let instance_flags = wgpu::InstanceFlags::empty();
+        #[cfg(not(target_os = "android"))]
+        let instance_flags = wgpu::InstanceFlags::from_build_config();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: backend,
+            flags: instance_flags,
             ..Default::default()
         });
 
