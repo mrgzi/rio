@@ -9,10 +9,6 @@ include = [
     "src/**/*.ttf",
     "src/**/*.otf",
     "src/**/*.wgsl",
-    "src/components/filters/**/*.slang",
-    "src/components/filters/**/*.slangp",
-    "src/components/filters/**/*.inc",
-    "src/components/filters/**/*.png",
     "src/**/*.rs",
     "src/**/*.metal",
 ]
@@ -58,14 +54,6 @@ futures = { workspace = true }
 tiny-skia = "0.12.0"
 wide = "1.2.0"
 
-librashader = { version = "0.10.0", default-features = false, features = ["runtime-wgpu", "stable", "presets"] }
-librashader-common = "0.10"
-librashader-presets = "0.10"
-librashader-preprocess = "0.10"
-librashader-pack = "0.10"
-librashader-reflect = { version = "0.10", features = ["stable", "wgsl"], default-features = false }
-librashader-runtime = "0.10"
-librashader-cache = "0.10"
 thiserror = "2.0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]

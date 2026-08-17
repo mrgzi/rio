@@ -51,11 +51,16 @@ impl<'a> WgpuContext<'a> {
         let instance_flags = wgpu::InstanceFlags::empty();
         #[cfg(not(target_os = "android"))]
         let instance_flags = wgpu::InstanceFlags::from_build_config();
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: backend,
-            flags: instance_flags,
-            ..Default::default()
-        });
+        // wgpu 29 removed `InstanceDescriptor::default()` and split
+        // construction into explicit display-handle-aware constructors.
+        // Sugarloaf's surface is created from `sugarloaf_window` below,
+        // which carries its own display handle, so we don't need to
+        // hand one to the instance descriptor here.
+        let mut descriptor =
+            wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = backend;
+        descriptor.flags = instance_flags;
+        let instance = wgpu::Instance::new(descriptor);
 
         tracing::info!("selected instance: {instance:?}");
 
