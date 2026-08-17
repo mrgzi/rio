@@ -69,10 +69,17 @@ thiserror = "2.0.1"
 metal = "0.32.0"
 objc-rs = "0.2.8"
 core-graphics-types = "0.2.0"
+block = "0.1.6"
+
+# CoreText font path is shared between macOS and iOS. iOS lacks Metal-direct
+# texture sharing (Metal lives behind wgpu there) but the font subsystem
+# (matching, glyph rasterization, family enumeration) goes straight through
+# CoreText on both platforms — bypassing font-kit, which panics on iOS due
+# to a `core-text` 20.x unwrap in font-trait extraction.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 core-graphics = "0.24.0"
 core-text = "21.0.0"
 core-foundation = "0.10.1"
-block = "0.1.6"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = "1.10.0"
@@ -82,12 +89,20 @@ twox-hash = { version = "2.1.1", default-features = false, features = [
 ] }
 wyhash = "0.5.0"
 memmap2 = { workspace = true }
-font-kit = "0.14.3"
 walkdir = "2.5.0"
 softbuffer = "0.4"
 ttf-parser = { version = "0.25.1", default-features = false, features = ["std", "opentype-layout", "apple-layout", "variable-fonts", "glyph-names"] }
 
-[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
+# font-kit drives system font enumeration + matching on Linux/Windows.
+# macOS still pulls it in because the `font/loader.rs` module compiles
+# there even though CoreText handles matching at runtime. iOS is the
+# only platform where loader is gated out of the build, because
+# font-kit's `core-text` dependency panics on iOS (missing trait
+# attributes on certain system fonts — CoreText path is used instead).
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))'.dependencies]
+font-kit = "0.14.3"
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
 fontconfig-parser = { version = "0.5.8", default-features = false }
 
 [dev-dependencies]

@@ -13,7 +13,7 @@
 use super::glyph::*;
 #[cfg(test)]
 use crate::font_introspector::shape::cluster::OwnedGlyphCluster;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 use crate::font_introspector::shape::Shaper;
 use crate::font_introspector::Metrics;
 use crate::layout::content::{CachedRun, ShapingCache, SpanStyleDecoration};
@@ -87,7 +87,7 @@ impl RenderData {
 }
 
 impl RenderData {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_run(
         &mut self,
@@ -171,7 +171,7 @@ impl RenderData {
     /// `metrics` comes from [`crate::font::macos::font_metrics`] — CoreText
     /// native ascent/descent/leading/underline, plus strikeout derived from
     /// x-height (CT has no strikeout API).
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_run_macos(
         &mut self,

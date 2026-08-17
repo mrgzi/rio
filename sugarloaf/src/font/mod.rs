@@ -1,9 +1,11 @@
 pub mod constants;
 mod fallbacks;
 pub mod fonts;
-#[cfg(not(target_arch = "wasm32"))]
+// loader uses font-kit, which we drop on iOS (panic in core-text 20.x trait
+// extraction) and on macOS (CoreText drives matching directly).
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
 pub mod loader;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod macos;
 pub mod metrics;
 pub mod nerd_font_attributes;
@@ -39,14 +41,14 @@ pub use crate::font_introspector::{Style, Weight};
 /// we never build a Database there. The macro lets call sites stay uniform
 /// (`try_find_font!(&db, spec, evict)`) even though `db` doesn't exist on
 /// macOS — macOS expansion simply discards that token.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 macro_rules! try_find_font {
     ($_db:expr, $spec:expr, $evictable:expr) => {{
         find_font($spec, $evictable)
     }};
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 macro_rules! try_find_font {
     ($db:expr, $spec:expr, $evictable:expr) => {{
         find_font($db, $spec, $evictable)
@@ -191,7 +193,7 @@ fn lookup_pass(
             }
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         let matched = {
             // Ask the CTFont directly whether it carries a glyph for each
             // codepoint. Avoids the `get_data` byte load — the fallback
@@ -222,7 +224,7 @@ fn lookup_pass(
             }
         };
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         let matched = {
             if let Some((shared_data, offset, key)) = library.get_data(&font_id) {
                 let font_ref = FontRef {
@@ -283,7 +285,7 @@ impl FontLibrary {
     ///
     /// parking_lot's `RwLock` supports recursive reads, so calling this
     /// from code that already holds a read lock on `inner` is safe.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub fn ct_font(&self, font_id: usize) -> Option<crate::font::macos::FontHandle> {
         self.inner
             .read()
@@ -305,12 +307,12 @@ impl FontLibrary {
     /// `FontLibrary` past load, and walking the dirs again would
     /// duplicate I/O. A follow-up can widen this once `FontLibrary`
     /// keeps a `Database` alive.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub fn family_names(&self) -> Vec<String> {
         crate::font::macos::all_families()
     }
 
-    #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+    #[cfg(all(not(target_os = "macos"), not(target_os = "ios"), not(target_arch = "wasm32")))]
     pub fn family_names(&self) -> Vec<String> {
         let source = font_kit::source::SystemSource::new();
         let mut families = source.all_families().unwrap_or_default();
@@ -527,14 +529,14 @@ impl FontLibraryData {
         // and never touch `loader::Database`, so skip its construction entirely
         // — `SystemSource::new` walks the full CoreText font list on init, which
         // is wasted work when we're about to do the same thing ourselves.
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         let mut db = loader::Database::new();
 
         let additional_dirs = spec.additional_dirs.unwrap_or_default();
         for dir in additional_dirs.into_iter().map(PathBuf::from) {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             crate::font::macos::register_fonts_in_dir(&dir);
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
             db.load_fonts_dir(dir);
         }
 
@@ -619,7 +621,7 @@ impl FontLibraryData {
         // — CoreText opens the file on demand, Rio never reads the bytes.
         // This keeps us from pulling the 200 MB Apple Color Emoji file into
         // `FONT_DATA_CACHE`.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             let primary_handle = self.inner.get(&FONT_ID_REGULAR).and_then(|f| {
                 if let Some(path) = &f.path {
@@ -653,9 +655,9 @@ impl FontLibraryData {
         // emoji, CJK, symbols, and every other system-suggested fallback —
         // `font.extras` is redundant there and would only duplicate or
         // compete with the cascade order. Skipped entirely.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         let _ = spec.extras;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         for extra_font in spec.extras {
             match try_find_font!(
                 &db,
@@ -678,7 +680,7 @@ impl FontLibraryData {
 
         // macOS finds Apple Color Emoji through `fallbacks::external_fallbacks`
         // above, so skip embedding Twemoji there.
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         self.insert(FontData::from_static_slice(FONT_TWEMOJI_EMOJI).unwrap());
         self.insert(FontData::from_static_slice(FONT_SYMBOLS_NERD_FONT_MONO).unwrap());
 
@@ -851,7 +853,7 @@ pub struct FontData {
     /// rather than a library-global cache. `Clone` of `FontHandle` is an
     /// atomic retain, so handing it out to the shape/raster/charmap paths
     /// is effectively free.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     handle: Option<crate::font::macos::FontHandle>,
 }
 
@@ -879,7 +881,7 @@ impl FontData {
     /// via a path that doesn't run on macOS. Access is a direct field read
     /// (no map lookup); callers clone the handle (cheap CF retain) to
     /// escape the lock scope.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub fn handle(&self) -> Option<&crate::font::macos::FontHandle> {
         self.handle.as_ref()
     }
@@ -908,7 +910,7 @@ impl FontData {
         // user font discovered through `find_font_path` on mac — none of
         // which have `data` set. Requires a CTFont (from path or bytes) and
         // bypasses font_introspector entirely.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         if self.data.is_none() {
             let handle = self
                 .path
@@ -1029,7 +1031,7 @@ impl FontData {
             // populate `handle` themselves. Leave it unset here; if
             // anything on mac does route through here, the `ct_font()`
             // fallback rebuilds from bytes/path on demand.
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             handle: None,
         })
     }
@@ -1040,7 +1042,7 @@ impl FontData {
     /// CoreText reads the file itself, so Rio's `FONT_DATA_CACHE` never
     /// ends up holding hundreds of MB of Apple Color Emoji / CJK font
     /// bytes.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub fn from_path_macos(
         path: PathBuf,
         font_spec: &SugarloafFont,
@@ -1097,7 +1099,7 @@ impl FontData {
         let synth = attributes.synthesize(attributes);
         let is_emoji = has_color_tables(&font);
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         let handle = crate::font::macos::FontHandle::from_static_bytes(data);
 
         Ok(Self {
@@ -1113,7 +1115,7 @@ impl FontData {
             path: None,
             is_emoji,
             metrics_cache: FxHashMap::default(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             handle,
         })
     }
@@ -1146,7 +1148,7 @@ impl FontData {
             path: None,
             is_emoji,
             metrics_cache: FxHashMap::default(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             handle: None,
         })
     }
@@ -1175,7 +1177,7 @@ enum FindResult {
     NotFound(SugarloafFont),
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[inline]
 fn find_font(font_spec: SugarloafFont, evictable: bool) -> FindResult {
     if font_spec.is_default_family() {
@@ -1211,7 +1213,7 @@ fn find_font(font_spec: SugarloafFont, evictable: bool) -> FindResult {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn map_stretch_macos(width: &Option<SugarloafFontWidth>) -> crate::font::macos::Stretch {
     use crate::font::macos::Stretch;
     match width {
@@ -1227,7 +1229,7 @@ fn map_stretch_macos(width: &Option<SugarloafFontWidth>) -> crate::font::macos::
     }
 }
 
-#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "ios"), not(target_arch = "wasm32")))]
 #[inline]
 fn find_font(
     db: &crate::font::loader::Database,
@@ -1386,6 +1388,9 @@ fn load_fallback_from_memory(font_spec: &SugarloafFont) -> FontData {
     FontData::from_static_slice(font_to_load).unwrap()
 }
 
+// Tracks the loader (font-kit) module's gating: only available where the
+// loader compiles in.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios"), not(target_os = "macos")))]
 #[allow(dead_code)]
 fn find_font_path(
     db: &crate::font::loader::Database,
