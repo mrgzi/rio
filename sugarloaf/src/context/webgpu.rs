@@ -3,12 +3,18 @@ use crate::SugarloafRenderer;
 
 pub struct WgpuContext<'a> {
     pub device: wgpu::Device,
-    pub surface: wgpu::Surface<'a>,
+    /// `None` when the context was constructed via [`WgpuContext::new_external`]
+    /// — i.e. another renderer (e.g. egui-wgpu) owns the surface and Sugarloaf
+    /// renders into a borrowed `TextureView` via [`Sugarloaf::render_wgpu_into`].
+    pub surface: Option<wgpu::Surface<'a>>,
     pub queue: wgpu::Queue,
     pub format: wgpu::TextureFormat,
     alpha_mode: wgpu::CompositeAlphaMode,
-    pub adapter_info: wgpu::AdapterInfo,
-    surface_caps: wgpu::SurfaceCapabilities,
+    /// `None` only in external mode — `adapter_info` is unavailable when the
+    /// adapter belongs to the host renderer.
+    pub adapter_info: Option<wgpu::AdapterInfo>,
+    /// `None` in external mode — host renderer already chose surface caps.
+    surface_caps: Option<wgpu::SurfaceCapabilities>,
     pub size: SugarloafWindowSize,
     pub scale: f32,
     pub supports_f16: bool,
@@ -171,7 +177,7 @@ impl<'a> WgpuContext<'a> {
         WgpuContext {
             device,
             queue,
-            surface,
+            surface: Some(surface),
             format,
             alpha_mode,
             size: SugarloafWindowSize {
@@ -179,11 +185,45 @@ impl<'a> WgpuContext<'a> {
                 height: size.height,
             },
             scale,
-            adapter_info,
-            surface_caps,
+            adapter_info: Some(adapter_info),
+            surface_caps: Some(surface_caps),
             // Always disabled on webgpu
             supports_f16: false,
             colorspace: renderer_config.colorspace,
+            max_texture_dimension_2d,
+        }
+    }
+
+    /// Construct a `WgpuContext` that borrows the host application's
+    /// `wgpu::Device` and `wgpu::Queue` instead of creating its own.
+    /// No surface is created — the caller owns frame acquisition and
+    /// presentation, and feeds Sugarloaf a `TextureView` via
+    /// [`crate::Sugarloaf::render_wgpu_into`].
+    ///
+    /// `format` must match the format of the texture views the caller
+    /// will pass to `render_wgpu_into` (otherwise the render pipeline
+    /// will fail validation).
+    pub fn new_external(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        format: wgpu::TextureFormat,
+        size: SugarloafWindowSize,
+        scale: f32,
+        colorspace: Colorspace,
+    ) -> WgpuContext<'static> {
+        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
+        WgpuContext {
+            device,
+            queue,
+            surface: None,
+            format,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            size,
+            scale,
+            adapter_info: None,
+            surface_caps: None,
+            supports_f16: false,
+            colorspace,
             max_texture_dimension_2d,
         }
     }
@@ -215,6 +255,12 @@ impl<'a> WgpuContext<'a> {
         self.size.width = width as f32;
         self.size.height = height as f32;
 
+        // External-surface mode: the host renderer manages the surface;
+        // Sugarloaf only needs to track the new logical size.
+        let (Some(surface), Some(caps)) = (&self.surface, &self.surface_caps) else {
+            return;
+        };
+
         // Configure view formats for wide color gamut support
         let view_formats = match self.colorspace {
             Colorspace::DisplayP3 | Colorspace::Rec2020 => {
@@ -225,10 +271,10 @@ impl<'a> WgpuContext<'a> {
             }
         };
 
-        self.surface.configure(
+        surface.configure(
             &self.device,
             &wgpu::SurfaceConfiguration {
-                usage: Self::get_texture_usage(&self.surface_caps),
+                usage: Self::get_texture_usage(caps),
                 format: self.format,
                 width,
                 height,
@@ -240,9 +286,13 @@ impl<'a> WgpuContext<'a> {
         );
     }
 
+    /// Surface capabilities as reported by the adapter at construction
+    /// time. `None` in external-surface mode (see
+    /// [`WgpuContext::new_external`]) — the host renderer owns the
+    /// surface, so its caps live there.
     #[inline]
-    pub fn surface_caps(&self) -> &wgpu::SurfaceCapabilities {
-        &self.surface_caps
+    pub fn surface_caps(&self) -> Option<&wgpu::SurfaceCapabilities> {
+        self.surface_caps.as_ref()
     }
 
     #[inline]
