@@ -557,7 +557,7 @@ impl Content {
     }
 
     /// Calculate character cell dimensions
-    fn calculate_character_cell_dimensions(
+    pub fn calculate_character_cell_dimensions(
         &self,
         layout: &TextLayout,
     ) -> crate::layout::TextDimensions {
