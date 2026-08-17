@@ -17,7 +17,22 @@ documentation = "https://docs.rs/crate/sugarloaf/latest"
 repository = "https://github.com/raphamorim/sugarloaf"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+# Termob fork: `rlib` only (upstream also built a `cdylib`).
+#
+# Building both wrote `libsugarloaf.dylib` and `libsugarloaf.rlib` into the same
+# `deps/` directory under the same base name. Cargo reports this as an "output
+# filename collision" warning and the two builds overwrite each other, after
+# which a dependent crate can type-check against one artifact and link against
+# another. That surfaces as `E0460: found possibly newer version of crate
+# sugarloaf` and bogus `E0308` mismatches such as
+# `expected sugarloaf::wgpu::Device, found wgpu::Device` — even though there is
+# exactly one `wgpu` in Cargo.lock and `cargo tree` shows a single shared
+# version. Incremental target dirs hid this by luck of build order; a clean
+# rebuild reproduces it every time.
+#
+# Nothing here needs the cdylib: the only consumer is `termob-gui`, which links
+# sugarloaf as an rlib and emits its own library artifact for mobile packaging.
+crate-type = ["rlib"]
 
 [package.metadata.docs.rs]
 all-features = true
