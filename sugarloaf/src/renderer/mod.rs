@@ -1422,7 +1422,19 @@ impl Renderer {
             // Calculate line height with modifier if available
             let line_height_without_mod = ascent + descent + leading;
             let line_height_mod = rte_layout.map_or(1.0, |layout| layout.line_height);
-            let line_height = line_height_without_mod * line_height_mod;
+            // The row is stepped by the height the LAYOUT published, which is
+            // what `logical_cell_dimensions` reports and therefore what a caller
+            // sized its grid, its texture and its viewport with. Recomputing it
+            // here made two answers to one question — the layout's is rounded up
+            // to a whole physical pixel and comes from a different metric source
+            // — and the difference, under a pixel per row, accumulates down the
+            // text: at 32 rows it left the last rows short of the area reserved
+            // for them. The width already comes from `dimensions`; this is the
+            // other axis of the same rule.
+            let line_height = rte_layout
+                .map(|layout| layout.dimensions.height)
+                .filter(|height| *height > 0.0)
+                .unwrap_or(line_height_without_mod * line_height_mod);
 
             let skip_count = selected_lines.map_or(0, |range| range.start);
             let take_count = selected_lines

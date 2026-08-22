@@ -1003,9 +1003,31 @@ impl Sugarloaf<'_> {
         font_size: f32,
         line_height: f32,
     ) -> Option<(f32, f32)> {
+        self.logical_cell_dimensions_at(
+            font_size,
+            line_height,
+            self.state.style.scale_factor,
+        )
+    }
+
+    /// [`Self::logical_cell_dimensions`] at an **explicit** scale factor.
+    ///
+    /// The cell height is rounded up to a whole physical pixel, so the answer
+    /// depends on the scale it is measured at: the same font gives one height
+    /// at 2× and a different one at 4×, and they are not multiples of each
+    /// other. A caller that asks before `rescale` has run therefore receives a
+    /// height the renderer will not step by — and one that caches the answer
+    /// keeps that mismatch for as long as it holds the cache. Naming the scale
+    /// makes the answer independent of when it is asked.
+    #[inline]
+    pub fn logical_cell_dimensions_at(
+        &self,
+        font_size: f32,
+        line_height: f32,
+        scale_factor: f32,
+    ) -> Option<(f32, f32)> {
         // Build a TextLayout that mirrors what set_transient_text_font_size
         // would produce, then ask Content for the dimensions.
-        let scale_factor = self.state.style.scale_factor;
         let layout = crate::layout::TextLayout {
             font_size,
             line_height,
